@@ -453,7 +453,14 @@
   border: 0;
   border-radius: 0;
   cursor: grab;
+  overscroll-behavior: contain;
   scrollbar-width: none;
+  touch-action: none;
+  user-select: none;
+}
+
+.city-map--fullscreen.is-dragging {
+  cursor: grabbing;
 }
 
 .city-map--fullscreen::-webkit-scrollbar {
@@ -481,6 +488,7 @@
   cursor: pointer;
 }
 
+.structure-marker,
 .institution-marker,
 .citizen-marker {
   position: absolute;
@@ -488,6 +496,43 @@
   align-items: center;
   justify-content: center;
   transform: translate(-50%, -50%);
+}
+
+.structure-marker {
+  z-index: 1;
+  min-width: 30px;
+  height: 30px;
+  border: 2px solid rgba(255, 255, 255, 0.92);
+  border-radius: 8px;
+  background: #435f91;
+  color: white;
+  font-size: 12px;
+  font-weight: 900;
+  box-shadow: 0 8px 22px rgba(24, 32, 31, 0.18);
+}
+
+.structure-marker--residential {
+  background: #6b8790;
+}
+
+.structure-marker--farm {
+  background: var(--food);
+}
+
+.structure-marker--market {
+  background: var(--credit);
+}
+
+.structure-marker--hospital {
+  background: #4b8a58;
+}
+
+.structure-marker--police {
+  background: var(--civic);
+}
+
+.structure-marker--prison {
+  background: #5a5046;
 }
 
 .institution-marker {
@@ -515,10 +560,13 @@
   background: #5a5046;
 }
 
+.structure-marker span,
 .institution-marker span {
   position: absolute;
   top: calc(100% + 5px);
   left: 50%;
+  display: grid;
+  gap: 2px;
   transform: translateX(-50%);
   border-radius: 999px;
   padding: 4px 8px;
@@ -532,6 +580,13 @@
   transition: opacity 140ms ease;
 }
 
+.structure-marker small {
+  color: rgba(255, 255, 255, 0.78);
+  font-size: 10px;
+  font-weight: 700;
+}
+
+.structure-marker:hover span,
 .institution-marker:hover span {
   opacity: 1;
 }
@@ -623,6 +678,8 @@
 .stat span,
 .resource-card span,
 .job-row span,
+.structure-row span,
+.structure-row small,
 .district-row,
 .behavior-profile span {
   color: var(--text-muted);
@@ -705,6 +762,7 @@
 .job-list,
 .event-list,
 .district-list,
+.structure-list,
 .institution-list,
 .citizen-list,
 .faction-list {
@@ -714,6 +772,7 @@
 
 .job-row,
 .district-row,
+.structure-row,
 .institution-row,
 .faction-row {
   display: flex;
@@ -726,7 +785,8 @@
   background: var(--surface-muted);
 }
 
-.job-row div {
+.job-row div,
+.structure-row div {
   display: grid;
   gap: 3px;
 }
@@ -923,6 +983,35 @@
   gap: 12px;
 }
 
+.manual-action-card,
+.ai-action-card,
+.ai-proposal-review {
+  display: grid;
+  gap: 12px;
+}
+
+.ai-action-card {
+  border-top: 1px solid var(--line);
+  padding-top: 14px;
+}
+
+.ai-action-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.ai-action-header h3 {
+  margin: 0;
+  font-size: 18px;
+}
+
+.ai-action-header .status-chip {
+  min-height: 32px;
+  white-space: nowrap;
+}
+
 .field-control {
   display: grid;
   gap: 7px;
@@ -970,6 +1059,23 @@
 .validation-message.is-risk {
   background: #f3d2d2;
   color: var(--risk);
+}
+
+.ai-proposal-reason {
+  display: grid;
+  gap: 5px;
+}
+
+.ai-proposal-reason span {
+  color: var(--text-muted);
+  font-size: 13px;
+  font-weight: 800;
+}
+
+.ai-proposal-reason p {
+  margin: 0;
+  color: var(--text);
+  line-height: 1.45;
 }
 
 .citizen-profile-header {
@@ -1133,6 +1239,13 @@
   color: #d7e8df;
   font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
   font-size: 14px;
+  line-height: 1.45;
+  overflow: auto;
+  white-space: pre-wrap;
+}
+
+.ai-proposal-review .proposal-json {
+  margin-top: 0;
 }
 
 .check-row {
@@ -1267,6 +1380,7 @@
 
   .topbar,
   .template-header,
+  .ai-action-header,
   .proposal-actions,
   .time-controls {
     align-items: stretch;

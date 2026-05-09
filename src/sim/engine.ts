@@ -4,6 +4,7 @@ import type {
   Citizen,
   CitizenAction,
   CitizenActionProposal,
+  CityStructure,
   CityEvent,
   CityState,
   Personality,
@@ -136,6 +137,10 @@ export function validateCitizenActionProposal(
 
   if (citizen.status !== "active" && isUnavailable(citizen, city.tick)) {
     reasons.push("Inactive citizens cannot start new actions.");
+  }
+
+  if (!structureForAction(city, normalizeCitizen(citizen), proposal.action, proposal.targetId)) {
+    reasons.push(`No city structure supports ${proposal.action.replace(/_/g, " ")}.`);
   }
 
   if (proposal.action === "report_crime" && !getInstitution(city, "police")) {
@@ -873,8 +878,9 @@ function institutionalMoodDelta(citizen: Citizen): number {
 }
 
 function moveCitizen(citizen: Citizen, action: CitizenAction, city: CityState, targetId?: string): Citizen {
-  const destinationDistrictId = destinationForAction(citizen, action, city, targetId);
-  const destination = districtPosition(destinationDistrictId, citizen.id);
+  const destinationTarget = destinationTargetForAction(citizen, action, city, targetId);
+  const destinationDistrictId = destinationTarget.districtId;
+  const destination = destinationTarget.position;
   const x = citizen.position.x + (destination.x - citizen.position.x) * 0.55;
   const y = citizen.position.y + (destination.y - citizen.position.y) * 0.55;
   const arrived = Math.abs(destination.x - x) + Math.abs(destination.y - y) < 2.4;
@@ -890,12 +896,40 @@ function moveCitizen(citizen: Citizen, action: CitizenAction, city: CityState, t
   };
 }
 
+function destinationTargetForAction(
+  citizen: Citizen,
+  action: CitizenAction,
+  city: CityState,
+  targetId?: string,
+): { districtId: string; position: Citizen["position"] } {
+  const structure = structureForAction(city, citizen, action, targetId);
+
+  if (structure) {
+    return {
+      districtId: structure.districtId,
+      position: structurePosition(structure, citizen.id),
+    };
+  }
+
+  const districtId = destinationForAction(citizen, action, city, targetId);
+  return {
+    districtId,
+    position: districtPosition(districtId, citizen.id),
+  };
+}
+
 function destinationForAction(
   citizen: Citizen,
   action: CitizenAction,
   city: CityState,
   targetId?: string,
 ): string {
+  const structure = structureForAction(city, citizen, action, targetId);
+
+  if (structure) {
+    return structure.districtId;
+  }
+
   if (citizen.status !== "active" && citizen.institutionId) {
     return city.institutions.find((institution) => institution.id === citizen.institutionId)?.districtId ?? citizen.districtId;
   }
@@ -931,21 +965,69 @@ function destinationForAction(
   return "homes";
 }
 
+function structureForAction(
+  city: CityState,
+  citizen: Citizen,
+  action: CitizenAction,
+  targetId?: string,
+): CityStructure | undefined {
+  if (citizen.status !== "active" && citizen.institutionId) {
+    const institution = city.institutions.find((item) => item.id === citizen.institutionId);
+    return institution ? structureForDistrict(city, institution.districtId) : undefined;
+  }
+
+  if (action === "work") {
+    const job = city.jobs.find((item) => item.kind === citizen.role);
+    return job ? structureForDistrict(city, job.districtId, "work") : city.structures.find((item) => item.functions.includes("work"));
+  }
+
+  if (action === "relocate") {
+    return structureForDistrict(city, citizen.destinationDistrictId) ?? structureForDistrict(city, "homes");
+  }
+
+  if (action === "sabotage_rival" || action === "abstract_violent_bounty" || action === "abstract_eliminate_citizen") {
+    const target = city.citizens.find((item) => item.id === targetId);
+    return target ? structureForDistrict(city, target.districtId) : structureForDistrict(city, citizen.districtId);
+  }
+
+  return city.structures.find((item) => item.functions.includes(action));
+}
+
+function structureForDistrict(
+  city: CityState,
+  districtId: string,
+  action?: CitizenAction,
+): CityStructure | undefined {
+  return (
+    city.structures.find((item) => item.districtId === districtId && (!action || item.functions.includes(action))) ??
+    city.structures.find((item) => item.districtId === districtId)
+  );
+}
+
 function chooseRelocationDistrict(citizen: Citizen, city: CityState): CityState["districts"][number] {
   const districtIndex = Math.abs(hashString(`${citizen.id}:${city.tick}`)) % city.districts.length;
   return city.districts[districtIndex] ?? city.districts[0];
 }
 
+function structurePosition(structure: CityStructure, citizenId: string): Citizen["position"] {
+  const offset = Math.abs(hashString(`${structure.id}:${citizenId}`));
+
+  return {
+    x: clampMap(structure.position.x + ((offset % 7) - 3) * 0.8),
+    y: clampMap(structure.position.y + (((offset / 7) % 7) - 3) * 0.8),
+  };
+}
+
 function districtPosition(districtId: string, citizenId: string): Citizen["position"] {
   const basePositions: Record<string, Citizen["position"]> = {
-    homes: { x: 18, y: 60 },
-    farm: { x: 42, y: 72 },
-    market: { x: 48, y: 49 },
-    civic: { x: 59, y: 35 },
-    workshop: { x: 55, y: 63 },
-    hospital: { x: 70, y: 39 },
-    police: { x: 66, y: 28 },
-    prison: { x: 82, y: 56 },
+    homes: { x: 42, y: 20 },
+    farm: { x: 69, y: 73 },
+    market: { x: 79, y: 66 },
+    civic: { x: 50, y: 42 },
+    workshop: { x: 57, y: 66 },
+    hospital: { x: 21, y: 20 },
+    police: { x: 21, y: 42 },
+    prison: { x: 83, y: 20 },
   };
   const base = basePositions[districtId] ?? { x: 50, y: 50 };
   const offset = Math.abs(hashString(citizenId));

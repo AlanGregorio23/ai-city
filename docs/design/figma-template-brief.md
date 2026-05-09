@@ -53,7 +53,7 @@ Reusable design pieces:
 
 ## Image Assets
 
-- `public/city-map-modern.png`: current modern raster map artwork.
+- `public/city-map-forest.png`: current modern raster map artwork with city boundary and forest outside the playable area.
 
 ## Visual Quality Bar
 

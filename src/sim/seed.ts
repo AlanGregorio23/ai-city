@@ -29,6 +29,72 @@ export const initialCityState: CityState = {
     { id: "police", name: "Central Police Station", kind: "police", stability: 67 },
     { id: "prison", name: "Civic Detention Center", kind: "prison", stability: 58 },
   ],
+  structures: [
+    {
+      id: "structure_homes",
+      name: "Harbor Apartments",
+      kind: "residential",
+      districtId: "homes",
+      position: { x: 42, y: 20 },
+      functions: ["rest", "socialize", "relocate"],
+    },
+    {
+      id: "structure_green_labs",
+      name: "Green Labs",
+      kind: "farm",
+      districtId: "farm",
+      position: { x: 69, y: 73 },
+      functions: ["work"],
+    },
+    {
+      id: "structure_glass_market",
+      name: "Glass Market",
+      kind: "market",
+      districtId: "market",
+      position: { x: 79, y: 66 },
+      functions: ["buy_food", "work", "exploit_market", "socialize"],
+    },
+    {
+      id: "structure_city_hall",
+      name: "City Hall",
+      kind: "civic",
+      districtId: "civic",
+      position: { x: 50, y: 42 },
+      functions: ["help_neighbor", "mediate_conflict", "faction_campaign", "study"],
+    },
+    {
+      id: "structure_maker_quarter",
+      name: "Maker Quarter",
+      kind: "work",
+      districtId: "workshop",
+      position: { x: 57, y: 66 },
+      functions: ["work"],
+    },
+    {
+      id: "structure_hospital",
+      name: "Northside Hospital",
+      kind: "hospital",
+      districtId: "hospital",
+      position: { x: 21, y: 20 },
+      functions: ["hospital_treatment", "work"],
+    },
+    {
+      id: "structure_police",
+      name: "Central Police Station",
+      kind: "police",
+      districtId: "police",
+      position: { x: 21, y: 42 },
+      functions: ["report_crime", "police_patrol", "arrest_citizen", "work"],
+    },
+    {
+      id: "structure_detention",
+      name: "Civic Detention Center",
+      kind: "prison",
+      districtId: "prison",
+      position: { x: 83, y: 20 },
+      functions: ["rest"],
+    },
+  ],
   institutions: [
     {
       id: "institution_civic",
@@ -183,7 +249,7 @@ export const initialCityState: CityState = {
       mood: 71,
       reputation: 58,
       status: "active",
-      position: { x: 18, y: 60 },
+      position: { x: 42, y: 20 },
       currentAction: "work",
       personality: {
         morality: 82,
@@ -206,7 +272,7 @@ export const initialCityState: CityState = {
       mood: 64,
       reputation: 43,
       status: "active",
-      position: { x: 48, y: 49 },
+      position: { x: 79, y: 66 },
       currentAction: "buy_food",
       personality: {
         morality: 44,
@@ -229,7 +295,7 @@ export const initialCityState: CityState = {
       mood: 77,
       reputation: 72,
       status: "active",
-      position: { x: 59, y: 35 },
+      position: { x: 50, y: 42 },
       currentAction: "help_neighbor",
       personality: {
         morality: 74,
@@ -252,7 +318,7 @@ export const initialCityState: CityState = {
       mood: 49,
       reputation: 36,
       status: "active",
-      position: { x: 55, y: 63 },
+      position: { x: 57, y: 66 },
       currentAction: "rest",
       personality: {
         morality: 29,
@@ -275,7 +341,7 @@ export const initialCityState: CityState = {
       mood: 68,
       reputation: 51,
       status: "active",
-      position: { x: 48, y: 49 },
+      position: { x: 79, y: 66 },
       currentAction: "work",
       personality: {
         morality: 58,
@@ -298,7 +364,7 @@ export const initialCityState: CityState = {
       mood: 63,
       reputation: 55,
       status: "active",
-      position: { x: 42, y: 72 },
+      position: { x: 69, y: 73 },
       currentAction: "work",
       personality: {
         morality: 69,
@@ -321,7 +387,7 @@ export const initialCityState: CityState = {
       mood: 59,
       reputation: 39,
       status: "active",
-      position: { x: 48, y: 49 },
+      position: { x: 79, y: 66 },
       currentAction: "exploit_market",
       personality: {
         morality: 37,
@@ -344,7 +410,7 @@ export const initialCityState: CityState = {
       mood: 66,
       reputation: 61,
       status: "active",
-      position: { x: 55, y: 63 },
+      position: { x: 57, y: 66 },
       currentAction: "work",
       personality: {
         morality: 63,
@@ -367,7 +433,7 @@ export const initialCityState: CityState = {
       mood: 74,
       reputation: 70,
       status: "active",
-      position: { x: 59, y: 35 },
+      position: { x: 50, y: 42 },
       currentAction: "help_neighbor",
       personality: {
         morality: 79,
@@ -390,7 +456,7 @@ export const initialCityState: CityState = {
       mood: 52,
       reputation: 32,
       status: "active",
-      position: { x: 55, y: 63 },
+      position: { x: 57, y: 66 },
       currentAction: "faction_campaign",
       personality: {
         morality: 33,
@@ -413,7 +479,7 @@ export const initialCityState: CityState = {
       mood: 62,
       reputation: 64,
       status: "active",
-      position: { x: 66, y: 28 },
+      position: { x: 21, y: 42 },
       currentAction: "police_patrol",
       personality: {
         morality: 71,

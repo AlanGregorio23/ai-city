@@ -29,13 +29,14 @@ Full-screen map
 
 - Title: Central grid
 - Status chip: Mood 65%
-- Visual asset: `public/city-map-modern.png`
+- Visual asset: `public/city-map-forest.png`
 - Map style:
   - modern city simulation illustration
   - central civic plaza and compact downtown blocks
   - apartments, clinic, workshop, market, green labs, transit, and waterfront
   - readable streets and open plazas for many citizen markers
   - subtle asphalt, concrete, glass, grass, and water texture
+  - clear edge boundary with pure forest outside the city map
   - citizen markers with initials and names on hover/selection
 - District labels:
   - Keep labels outside the map as a legend in the dashboard.

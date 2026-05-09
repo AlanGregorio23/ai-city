@@ -44,7 +44,7 @@ docs/
   roadmap.md            Incremental build plan
   decisions/            Architecture decision records
 public/
-  city-map-modern.png   Current modern raster map asset
+  city-map-forest.png   Current bounded forest city map asset
 src/
   ai/                   AI provider abstraction and Ollama adapter
   app/                  Application shell and screen composition
@@ -63,7 +63,7 @@ src/
 - Figma map workspace: https://www.figma.com/design/QFOG1r2z3lu6IOYNT0zwtZ?node-id=8-2
 - Figma citizens: https://www.figma.com/design/QFOG1r2z3lu6IOYNT0zwtZ?node-id=10-2
 - Figma events: https://www.figma.com/design/QFOG1r2z3lu6IOYNT0zwtZ?node-id=11-2
-- Modern map image: `public/city-map-modern.png`
+- Modern map image: `public/city-map-forest.png`
 - Screen spec: `docs/design/screen-spec.md`
 
 ## App Views
@@ -86,6 +86,31 @@ Optional local AI:
 ```bash
 ollama pull qwen3:8b
 ollama serve
+npm run dev
+```
+
+Set `.env` from `.env.example` if you want a different local endpoint or model:
+
+```txt
+VITE_OLLAMA_BASE_URL=http://localhost:11434
+VITE_OLLAMA_MODEL=qwen3:8b
+```
+
+Open `http://localhost:5173/?page=citizens`, select a citizen, then click
+`Ask AI`. The browser calls Ollama locally, shows the returned JSON proposal and
+reason, runs deterministic validation, and only enables `Apply AI proposal` when
+the proposal is valid. If the browser blocks the local request, start Ollama with
+an explicit origin allowlist before `ollama serve`:
+
+```powershell
+$env:OLLAMA_ORIGINS="http://localhost:5173,http://127.0.0.1:5173"
+ollama serve
+```
+
+You can smoke-test Ollama outside the app with:
+
+```powershell
+Invoke-RestMethod http://localhost:11434/api/generate -Method Post -ContentType "application/json" -Body '{"model":"qwen3:8b","prompt":"Return {\"ok\":true} as JSON.","format":"json","stream":false}'
 ```
 
 The app should still run if Ollama is not available. AI is an enhancement, not a

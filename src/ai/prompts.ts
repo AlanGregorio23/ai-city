@@ -30,10 +30,25 @@ export function buildCitySummaryPrompt(city: CityState): string {
 }
 
 export function buildCitizenActionPrompt(city: CityState, citizen: Citizen): string {
+  const targetCandidates = city.citizens
+    .filter((item) => item.id !== citizen.id)
+    .map((item) => ({
+      id: item.id,
+      name: item.name,
+      role: item.role,
+      status: item.status,
+      reputation: item.reputation,
+      districtId: item.districtId,
+      factionId: item.factionId ?? null,
+    }));
+
   return [
     "You propose one action for a citizen in a city simulation.",
-    "Return only JSON with citizenId, action, targetId, reason.",
+    "Return exactly one valid JSON object. Do not include markdown, comments, or prose.",
+    'Schema: {"citizenId":"string","action":"string","targetId":"string or null","reason":"short string"}',
     "Allowed actions: work, rest, buy_food, help_neighbor, socialize, relocate, study, mediate_conflict, report_crime, police_patrol, arrest_citizen, hospital_treatment, exploit_market, faction_campaign, sabotage_rival, abstract_violent_bounty, abstract_eliminate_citizen.",
+    "Use the Citizen ID below as citizenId. Use targetId null unless the chosen action needs another citizen.",
+    "If a target is needed, choose only from Target candidates.",
     "The simulation will validate your proposal before it can change state.",
     "For report_crime, police_patrol, arrest_citizen, hospital_treatment, describe only civic simulation consequences such as trust, case load, detention, sentence review, and recovery time.",
     "For abstract_violent_bounty or abstract_eliminate_citizen, describe only game/simulation consequences; do not include real-world methods or instructions.",
@@ -55,6 +70,7 @@ export function buildCitizenActionPrompt(city: CityState, citizen: Citizen): str
     `Institution ID: ${citizen.institutionId ?? "none"}`,
     `Personality: ${JSON.stringify(citizen.personality)}`,
     `Faction ID: ${citizen.factionId ?? "none"}`,
+    `Target candidates: ${JSON.stringify(targetCandidates)}`,
     "",
     `City food: ${city.resources.food}`,
     `City credits: ${city.resources.credits}`,

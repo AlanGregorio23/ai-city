@@ -18,7 +18,8 @@ import {
   UsersRound,
   X,
 } from "lucide-react";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { OllamaProvider } from "../ai/ollama";
 import {
   advanceCity,
   applyCitizenActionProposal,
@@ -27,7 +28,16 @@ import {
   validateCitizenActionProposal,
 } from "../sim/engine";
 import { initialCityState } from "../sim/seed";
-import type { Citizen, CitizenAction, CityEvent, CityState, Personality, ResourceKey } from "../sim/types";
+import type {
+  Citizen,
+  CitizenAction,
+  CitizenActionProposal,
+  CityEvent,
+  CityState,
+  Personality,
+  ProposalValidation,
+  ResourceKey,
+} from "../sim/types";
 
 type AppView = "overview" | "map" | "citizens" | "events";
 
@@ -60,6 +70,11 @@ const speedOptions = [
   { label: "6x", value: 6, intervalMs: 10000 },
   { label: "10x", value: 10, intervalMs: 6000 },
 ];
+
+const mapAspectRatio = 1672 / 941;
+const mapInverseAspectRatio = 941 / 1672;
+
+const aiProvider = new OllamaProvider();
 
 export function App() {
   const [city, setCity] = useState<CityState>(initialCityState);
@@ -114,6 +129,10 @@ export function App() {
     );
   }
 
+  function handleApplyCitizenProposal(proposal: CitizenActionProposal) {
+    setCity((current) => applyCitizenActionProposal(current, proposal));
+  }
+
   function handlePersonalityChange(key: keyof Personality, value: number) {
     if (!selectedCitizen || key === "traits") {
       return;
@@ -123,7 +142,7 @@ export function App() {
   }
 
   function handleZoomChange(value: number) {
-    setMapZoom(Math.min(2.4, Math.max(1, Number(value.toFixed(2)))));
+    setMapZoom(clampMapZoom(value));
   }
 
   if (templateView === "citizen") {
@@ -131,7 +150,25 @@ export function App() {
   }
 
   if (templateView === "proposal") {
-    return <AiProposalTemplate citizen={city.citizens[1] ?? selectedCitizen} />;
+    const templateCitizen = city.citizens[1] ?? selectedCitizen;
+
+    return (
+      <AiProposalTemplate
+        city={city}
+        citizen={templateCitizen}
+        onApplyCitizenAction={(action, targetId) =>
+          setCity((current) =>
+            applyCitizenActionProposal(current, {
+              citizenId: templateCitizen.id,
+              action,
+              targetId,
+              reason: "Manual player choice from citizen controls.",
+            }),
+          )
+        }
+        onApplyCitizenProposal={handleApplyCitizenProposal}
+      />
+    );
   }
 
   if (templateView === "assets") {
@@ -208,6 +245,7 @@ export function App() {
           onPersonalityChange={handlePersonalityChange}
           onSelectCitizen={setSelectedCitizenId}
           onApplyCitizenAction={handleApplyCitizenAction}
+          onApplyCitizenProposal={handleApplyCitizenProposal}
           selectedCitizen={selectedCitizen}
           selectedCitizenId={selectedCitizenId}
         />
@@ -263,6 +301,7 @@ function FullscreenMapView({
         onSelectCitizen={onSelectCitizen}
         selectedCitizenId={selectedCitizenId}
         variant="fullscreen"
+        onZoomChange={onZoomChange}
         zoom={mapZoom}
       />
 
@@ -297,7 +336,7 @@ function FullscreenMapView({
         </button>
         <input
           aria-label="Zoom"
-          max="2.2"
+          max="3"
           min="1"
           step="0.1"
           type="range"
@@ -372,6 +411,11 @@ function FullscreenMapView({
         </section>
 
         <section className="drawer-section">
+          <PanelTitle eyebrow="Structures" title="Functions" />
+          <StructureList city={city} />
+        </section>
+
+        <section className="drawer-section">
           <PanelTitle eyebrow="Institutions" title="Civic services" />
           <InstitutionList city={city} />
         </section>
@@ -435,6 +479,7 @@ function OverviewView({
           <span className="status-chip">Mood {averageMood}%</span>
         </div>
         <CityInfo averageMood={averageMood} averageStability={averageStability} city={city} />
+        <StructureList city={city} />
         <InstitutionList city={city} />
       </section>
 
@@ -464,6 +509,7 @@ function OverviewView({
 function CitizensView({
   city,
   onApplyCitizenAction,
+  onApplyCitizenProposal,
   onPersonalityChange,
   onSelectCitizen,
   selectedCitizen,
@@ -471,6 +517,7 @@ function CitizensView({
 }: {
   city: CityState;
   onApplyCitizenAction: (action: CitizenAction, targetId?: string) => void;
+  onApplyCitizenProposal: (proposal: CitizenActionProposal) => void;
   onPersonalityChange: (key: keyof Personality, value: number) => void;
   onSelectCitizen: (citizenId: string) => void;
   selectedCitizen: Citizen;
@@ -509,7 +556,12 @@ function CitizensView({
 
       <section className="panel citizen-notes-panel">
         <PanelTitle eyebrow="Controls" title="Citizen choice" />
-        <CitizenActionControls city={city} citizen={selectedCitizen} onApplyCitizenAction={onApplyCitizenAction} />
+        <CitizenActionControls
+          city={city}
+          citizen={selectedCitizen}
+          onApplyCitizenAction={onApplyCitizenAction}
+          onApplyCitizenProposal={onApplyCitizenProposal}
+        />
       </section>
 
       <section className="panel citizen-behavior-panel">
@@ -636,14 +688,20 @@ function CitizenActionControls({
   city,
   citizen,
   onApplyCitizenAction,
+  onApplyCitizenProposal,
 }: {
   city: CityState;
   citizen: Citizen;
   onApplyCitizenAction: (action: CitizenAction, targetId?: string) => void;
+  onApplyCitizenProposal: (proposal: CitizenActionProposal) => void;
 }) {
   const firstTarget = city.citizens.find((item) => item.id !== citizen.id)?.id ?? "";
   const [selectedAction, setSelectedAction] = useState<CitizenAction>("work");
   const [targetId, setTargetId] = useState(firstTarget);
+  const [aiProposal, setAiProposal] = useState<CitizenActionProposal | null>(null);
+  const [aiError, setAiError] = useState("");
+  const [aiLoading, setAiLoading] = useState(false);
+  const [aiApplied, setAiApplied] = useState(false);
   const option = actionOptions.find((item) => item.action === selectedAction);
   const effectiveTargetId = option?.needsTarget ? targetId : undefined;
   const validation = useMemo(
@@ -656,6 +714,12 @@ function CitizenActionControls({
       }),
     [city, citizen.id, effectiveTargetId, selectedAction],
   );
+  const aiValidation = useMemo(
+    () => (aiProposal ? validateCitizenActionProposal(city, aiProposal) : undefined),
+    [aiProposal, city],
+  );
+  const aiProposalMatchesCitizen = aiProposal?.citizenId === citizen.id;
+  const canApplyAiProposal = Boolean(aiProposal && aiValidation?.valid && aiProposalMatchesCitizen && !aiLoading);
   const disabled = !validation.valid;
 
   useEffect(() => {
@@ -666,80 +730,293 @@ function CitizenActionControls({
     setTargetId(firstTarget);
   }, [citizen.id, firstTarget, targetId]);
 
+  useEffect(() => {
+    setAiProposal(null);
+    setAiError("");
+    setAiApplied(false);
+  }, [citizen.id]);
+
+  async function handleAskAi() {
+    setAiLoading(true);
+    setAiError("");
+    setAiApplied(false);
+
+    try {
+      const proposal = await aiProvider.proposeCitizenAction(city, citizen.id);
+      setAiProposal(proposal);
+    } catch (error) {
+      setAiProposal(null);
+      setAiError(error instanceof Error ? error.message : "Ollama request failed.");
+    } finally {
+      setAiLoading(false);
+    }
+  }
+
+  function handleApplyAiProposal() {
+    if (!aiProposal || !canApplyAiProposal) {
+      return;
+    }
+
+    onApplyCitizenProposal(aiProposal);
+    setAiApplied(true);
+  }
+
   return (
     <div className="action-controls">
-      <label className="field-control">
-        <span>Action</span>
-        <select value={selectedAction} onChange={(event) => setSelectedAction(event.target.value as CitizenAction)}>
-          {actionOptions.map((item) => (
-            <option key={item.action} value={item.action}>
-              {item.label}
-            </option>
-          ))}
-        </select>
-      </label>
-
-      {option?.needsTarget ? (
+      <section className="manual-action-card" aria-label="Manual action">
         <label className="field-control">
-          <span>Target</span>
-          <select value={targetId} onChange={(event) => setTargetId(event.target.value)}>
-            {city.citizens
-              .filter((item) => item.id !== citizen.id)
-              .map((item) => (
-                <option key={item.id} value={item.id}>
-                  {item.name}
-                </option>
-              ))}
+          <span>Action</span>
+          <select value={selectedAction} onChange={(event) => setSelectedAction(event.target.value as CitizenAction)}>
+            {actionOptions.map((item) => (
+              <option key={item.action} value={item.action}>
+                {item.label}
+              </option>
+            ))}
           </select>
         </label>
-      ) : null}
 
-      <button
-        className="primary-button full-width-button"
-        disabled={disabled}
-        type="button"
-        onClick={() => onApplyCitizenAction(selectedAction, effectiveTargetId)}
-      >
-        <ShieldAlert size={18} />
-        Apply validated action
-      </button>
+        {option?.needsTarget ? (
+          <label className="field-control">
+            <span>Target</span>
+            <select value={targetId} onChange={(event) => setTargetId(event.target.value)}>
+              {city.citizens
+                .filter((item) => item.id !== citizen.id)
+                .map((item) => (
+                  <option key={item.id} value={item.id}>
+                    {item.name}
+                  </option>
+                ))}
+            </select>
+          </label>
+        ) : null}
 
-      <div className={`validation-message ${validation.valid ? "is-good" : "is-risk"}`}>
-        <strong>{validation.valid ? "Valid deterministic action" : "Rule check blocked"}</strong>
-        {[...validation.reasons, ...validation.warnings].map((message) => (
-          <span key={message}>{message}</span>
-        ))}
-      </div>
+        <button
+          className="primary-button full-width-button"
+          disabled={disabled}
+          type="button"
+          onClick={() => onApplyCitizenAction(selectedAction, effectiveTargetId)}
+        >
+          <ShieldAlert size={18} />
+          Apply validated action
+        </button>
+
+        <ValidationMessage validation={validation} />
+      </section>
+
+      <section className="ai-action-card" aria-label="AI action proposal">
+        <div className="ai-action-header">
+          <div>
+            <p className="eyebrow">Local AI</p>
+            <h3>Ollama proposal</h3>
+          </div>
+          <span className="status-chip">validated before apply</span>
+        </div>
+
+        <button className="secondary-button full-width-button" disabled={aiLoading} type="button" onClick={handleAskAi}>
+          <Sparkles size={18} />
+          {aiLoading ? "Asking Ollama..." : "Ask AI"}
+        </button>
+
+        {aiError ? (
+          <div className="validation-message is-risk">
+            <strong>Ollama unavailable or invalid response</strong>
+            <span>{aiError}</span>
+          </div>
+        ) : null}
+
+        {aiProposal ? (
+          <div className="ai-proposal-review">
+            <div className="ai-proposal-reason">
+              <span>Reason</span>
+              <p>{aiProposal.reason}</p>
+            </div>
+
+            <pre className="proposal-json">
+              <code>{JSON.stringify(aiProposal, null, 2)}</code>
+            </pre>
+
+            {aiValidation ? <ValidationMessage validation={aiValidation} /> : null}
+
+            {!aiProposalMatchesCitizen ? (
+              <div className="validation-message is-risk">
+                <strong>Proposal blocked</strong>
+                <span>The AI proposal does not match the selected citizen.</span>
+              </div>
+            ) : null}
+
+            {aiApplied ? (
+              <div className="validation-message is-good">
+                <strong>Applied through simulation rules</strong>
+                <span>The AI proposal was passed to the deterministic apply function.</span>
+              </div>
+            ) : null}
+
+            <button
+              className="primary-button full-width-button"
+              disabled={!canApplyAiProposal}
+              type="button"
+              onClick={handleApplyAiProposal}
+            >
+              <ShieldAlert size={18} />
+              Apply AI proposal
+            </button>
+          </div>
+        ) : null}
+      </section>
+    </div>
+  );
+}
+
+function ValidationMessage({ validation }: { validation: ProposalValidation }) {
+  const messages = [...validation.reasons, ...validation.warnings];
+
+  return (
+    <div className={`validation-message ${validation.valid ? "is-good" : "is-risk"}`}>
+      <strong>{validation.valid ? "Valid deterministic action" : "Rule check blocked"}</strong>
+      {messages.length === 0 ? <span>No rule warnings.</span> : null}
+      {messages.map((message) => (
+        <span key={message}>{message}</span>
+      ))}
     </div>
   );
 }
 
 function CityMap({
   city,
+  onZoomChange,
   onSelectCitizen,
   selectedCitizenId,
   variant,
   zoom,
 }: {
   city: CityState;
+  onZoomChange?: (value: number) => void;
   onSelectCitizen: (citizenId: string) => void;
   selectedCitizenId: string;
   variant: "preview" | "fullscreen";
   zoom: number;
 }) {
+  const mapRef = useRef<HTMLDivElement | null>(null);
+  const dragRef = useRef<{
+    pointerId: number;
+    scrollLeft: number;
+    scrollTop: number;
+    x: number;
+    y: number;
+  } | null>(null);
+  const [isDragging, setIsDragging] = useState(false);
+  const isFullscreen = variant === "fullscreen";
+  const zoomPercent = zoom * 100;
+  const zoomLayerStyle = isFullscreen
+    ? {
+        height: `max(${zoomPercent}dvh, ${zoomPercent * mapInverseAspectRatio}vw)`,
+        width: `max(${zoomPercent}vw, ${zoomPercent * mapAspectRatio}dvh)`,
+      }
+    : { height: `${zoomPercent}%`, width: `${zoomPercent}%` };
+
+  function handlePointerDown(event: React.PointerEvent<HTMLDivElement>) {
+    const target = event.target instanceof HTMLElement ? event.target : null;
+
+    if (!isFullscreen || target?.closest("button")) {
+      return;
+    }
+
+    const map = mapRef.current;
+
+    if (!map) {
+      return;
+    }
+
+    dragRef.current = {
+      pointerId: event.pointerId,
+      scrollLeft: map.scrollLeft,
+      scrollTop: map.scrollTop,
+      x: event.clientX,
+      y: event.clientY,
+    };
+    map.setPointerCapture(event.pointerId);
+    setIsDragging(true);
+  }
+
+  function handlePointerMove(event: React.PointerEvent<HTMLDivElement>) {
+    const drag = dragRef.current;
+    const map = mapRef.current;
+
+    if (!drag || !map || event.pointerId !== drag.pointerId) {
+      return;
+    }
+
+    map.scrollLeft = drag.scrollLeft - (event.clientX - drag.x);
+    map.scrollTop = drag.scrollTop - (event.clientY - drag.y);
+  }
+
+  function handlePointerEnd(event: React.PointerEvent<HTMLDivElement>) {
+    const map = mapRef.current;
+
+    if (map && dragRef.current?.pointerId === event.pointerId) {
+      map.releasePointerCapture(event.pointerId);
+    }
+
+    dragRef.current = null;
+    setIsDragging(false);
+  }
+
+  function handleWheel(event: React.WheelEvent<HTMLDivElement>) {
+    if (!isFullscreen || !onZoomChange) {
+      return;
+    }
+
+    event.preventDefault();
+
+    const map = mapRef.current;
+
+    if (!map) {
+      return;
+    }
+
+    const rect = map.getBoundingClientRect();
+    const offsetX = event.clientX - rect.left;
+    const offsetY = event.clientY - rect.top;
+    const ratioX = (map.scrollLeft + offsetX) / Math.max(1, map.scrollWidth);
+    const ratioY = (map.scrollTop + offsetY) / Math.max(1, map.scrollHeight);
+    const nextZoom = clampMapZoom(zoom - event.deltaY * 0.0015);
+
+    if (nextZoom === zoom) {
+      return;
+    }
+
+    onZoomChange(nextZoom);
+    window.requestAnimationFrame(() => {
+      map.scrollLeft = ratioX * map.scrollWidth - offsetX;
+      map.scrollTop = ratioY * map.scrollHeight - offsetY;
+    });
+  }
+
   return (
-    <div className={`city-map city-map--${variant}`}>
-      <div className="map-zoom-layer" style={{ height: `${zoom * 100}%`, width: `${zoom * 100}%` }}>
+    <div
+      className={`city-map city-map--${variant} ${isDragging ? "is-dragging" : ""}`}
+      ref={mapRef}
+      onPointerCancel={handlePointerEnd}
+      onPointerDown={handlePointerDown}
+      onPointerLeave={handlePointerEnd}
+      onPointerMove={handlePointerMove}
+      onPointerUp={handlePointerEnd}
+      onWheel={handleWheel}
+    >
+      <div className="map-zoom-layer" style={zoomLayerStyle}>
         <CityMapArtwork />
-        {city.institutions.map((institution) => (
+        {city.structures.map((structure) => (
           <div
-            className={`institution-marker institution-marker--${institution.kind}`}
-            key={institution.id}
-            style={institutionMarkerPosition(institution.districtId)}
-            title={`${institution.name}: load ${institution.load}/${institution.capacity}`}
+            className={`structure-marker structure-marker--${structure.kind}`}
+            key={structure.id}
+            style={mapPointStyle(structure.position)}
+            title={`${structure.name}: ${structure.functions.map(formatAction).join(", ")}`}
           >
-            {institution.kind.slice(0, 1).toUpperCase()}
-            <span>{institution.name}</span>
+            {structure.kind.slice(0, 1).toUpperCase()}
+            <span>
+              <strong>{structure.name}</strong>
+              <small>{structure.functions.map(formatAction).join(" / ")}</small>
+            </span>
           </div>
         ))}
         {city.citizens.map((citizen, index) => (
@@ -777,7 +1054,7 @@ function getInitialAppView(): AppView {
 }
 
 function CityMapArtwork() {
-  return <img className="city-art" src="/city-map-modern.png" alt="Modern illustrated city map" />;
+  return <img className="city-art" src="/city-map-forest.png" alt="Modern city map surrounded by forest" />;
 }
 
 function PanelTitle({
@@ -894,6 +1171,22 @@ function DistrictList({ city }: { city: CityState }) {
         <div className="district-row" key={district.id}>
           <span className={`legend-dot legend-dot--${district.kind}`}>{district.name}</span>
           <strong>{district.stability}%</strong>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function StructureList({ city }: { city: CityState }) {
+  return (
+    <div className="structure-list">
+      {city.structures.map((structure) => (
+        <div className="structure-row" key={structure.id}>
+          <div>
+            <strong>{structure.name}</strong>
+            <span>{formatAction(structure.kind)}</span>
+          </div>
+          <small>{structure.functions.map(formatAction).join(" / ")}</small>
         </div>
       ))}
     </div>
@@ -1085,7 +1378,17 @@ function CitizenDetailTemplate({ citizen }: { citizen: Citizen }) {
   );
 }
 
-function AiProposalTemplate({ citizen }: { citizen: Citizen }) {
+function AiProposalTemplate({
+  city,
+  citizen,
+  onApplyCitizenAction,
+  onApplyCitizenProposal,
+}: {
+  city: CityState;
+  citizen: Citizen;
+  onApplyCitizenAction: (action: CitizenAction, targetId?: string) => void;
+  onApplyCitizenProposal: (proposal: CitizenActionProposal) => void;
+}) {
   return (
     <main className="shell template-shell">
       <header className="template-header">
@@ -1098,38 +1401,22 @@ function AiProposalTemplate({ citizen }: { citizen: Citizen }) {
 
       <section className="proposal-layout">
         <div className="panel proposal-panel">
-          <p className="eyebrow">Suggested action</p>
-          <h2>Abstract violent bounty</h2>
+          <p className="eyebrow">Selected citizen</p>
+          <h2>{citizen.name}</h2>
           <p className="proposal-text">
-            {citizen.name} considers an off-screen violent scenario for payment inside the simulation.
+            This screen uses the same live Ollama proposal flow as the Citizens panel. No proposal is hardcoded:
+            click Ask AI to request JSON from the local model, validate it, then apply it through simulation rules.
           </p>
-
-          <div className="proposal-json">
-            <span>{"{"}</span>
-            <span>"citizenId": "{citizen.id}",</span>
-            <span>"action": "abstract_violent_bounty",</span>
-            <span>"targetId": "citizen_anna",</span>
-            <span>"reason": "high ambition, low empathy, high conflict pressure"</span>
-            <span>{"}"}</span>
-          </div>
-
-          <div className="proposal-actions">
-            <button className="secondary-button" type="button">
-              Reject
-            </button>
-            <button className="primary-button" type="button">
-              Accept if valid
-            </button>
-          </div>
         </div>
 
         <div className="panel validation-panel">
-          <p className="eyebrow">Simulation validation</p>
-          <h2>Rule check</h2>
-          <div className="check-row is-good">Citizen exists</div>
-          <div className="check-row is-good">Target exists and differs from actor</div>
-          <div className="check-row is-warning">Requires low morality, low empathy, high risk</div>
-          <div className="check-row is-risk">Abstract only: severe social penalties apply</div>
+          <PanelTitle eyebrow="Controls" title="Live proposal" />
+          <CitizenActionControls
+            city={city}
+            citizen={citizen}
+            onApplyCitizenAction={onApplyCitizenAction}
+            onApplyCitizenProposal={onApplyCitizenProposal}
+          />
         </div>
       </section>
     </main>
@@ -1148,8 +1435,8 @@ function AssetsTemplate({ citizens }: { citizens: Citizen[] }) {
 
       <section className="assets-grid">
         <div className="panel asset-map-panel">
-          <PanelTitle eyebrow="Image asset" title="Modern city map" />
-          <img className="asset-map-image" src="/city-map-modern.png" alt="Modern city map asset" />
+          <PanelTitle eyebrow="Image asset" title="Bounded forest city map" />
+          <img className="asset-map-image" src="/city-map-forest.png" alt="Modern city map surrounded by forest" />
         </div>
 
         <div className="panel">
@@ -1350,6 +1637,13 @@ function markerPosition(citizen: Citizen, index: number) {
   return positions[index % positions.length];
 }
 
+function mapPointStyle(position: CityState["structures"][number]["position"]) {
+  return {
+    left: `${clampMarkerPercent(position.x)}%`,
+    top: `${clampMarkerPercent(position.y)}%`,
+  };
+}
+
 function institutionMarkerPosition(districtId: string) {
   const positions: Record<string, { left: string; top: string }> = {
     civic: { left: "59%", top: "35%" },
@@ -1363,6 +1657,10 @@ function institutionMarkerPosition(districtId: string) {
 
 function clampMarkerPercent(value: number) {
   return Math.min(94, Math.max(6, Math.round(value * 10) / 10));
+}
+
+function clampMapZoom(value: number) {
+  return Math.min(3, Math.max(1, Number(value.toFixed(2))));
 }
 
 function formatAction(action: string) {
