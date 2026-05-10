@@ -97,6 +97,15 @@ export interface CityStructure {
   functions: CitizenAction[];
 }
 
+export interface RoadSegment {
+  id: string;
+  name: string;
+  fromStructureId: string;
+  toStructureId: string;
+  kind: "primary" | "secondary" | "service";
+  travelMultiplier?: number;
+}
+
 export interface CityMetrics {
   publicSafety: number;
   publicHealth: number;
@@ -150,6 +159,28 @@ export interface CityEvent {
   targetId?: string;
 }
 
+export interface CitizenTask {
+  id: string;
+  citizenId: string;
+  action: CitizenAction;
+  targetId?: string;
+  reason: string;
+  proposedBy: "ai";
+  status: "active" | "completed" | "blocked";
+  proposedAtTick: number;
+  startedAtTick: number;
+  completesAtTick: number;
+  durationTicks: number;
+  baseDurationTicks: number;
+  travelDurationTicks: number;
+  travelDistance: number;
+  workStartsAtTick: number;
+  originStructureId?: string;
+  destinationStructureId?: string;
+  routeStructureIds: string[];
+  validationWarnings: string[];
+}
+
 export interface CityState {
   tick: number;
   day: number;
@@ -158,11 +189,13 @@ export interface CityState {
   scenario: SocioEconomicScenario;
   districts: District[];
   structures: CityStructure[];
+  roads: RoadSegment[];
   institutions: CivicInstitution[];
   metrics: CityMetrics;
   factions: Faction[];
   jobs: Job[];
   citizens: Citizen[];
+  tasks: CitizenTask[];
   events: CityEvent[];
 }
 

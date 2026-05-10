@@ -44,7 +44,7 @@ docs/
   roadmap.md            Incremental build plan
   decisions/            Architecture decision records
 public/
-  city-map-forest.png   Current bounded forest city map asset
+  city-map-forest.png      Current bounded forest city map asset
 src/
   ai/                   AI provider abstraction and Ollama adapter
   app/                  Application shell and screen composition
@@ -97,10 +97,16 @@ VITE_OLLAMA_MODEL=qwen3:8b
 ```
 
 Open `http://localhost:5173/?page=citizens`, select a citizen, then click
-`Ask AI`. The browser calls Ollama locally, shows the returned JSON proposal and
-reason, runs deterministic validation, and only enables `Apply AI proposal` when
-the proposal is valid. If the browser blocks the local request, start Ollama with
-an explicit origin allowlist before `ollama serve`:
+`Ask AI for next task`. The browser calls Ollama locally, shows the returned JSON
+proposal and reason, runs deterministic validation, and schedules valid proposals
+as timed tasks. The simulation applies the consequences only when that task
+finishes, so citizens cannot spam instant actions. If the browser blocks the local
+request, start Ollama with an explicit origin allowlist before `ollama serve`:
+
+Auto time uses the map clock: at `6x`, one in-game hour takes 10 real minutes;
+at `10x`, one in-game hour takes 6 real minutes. A 4-hour work task therefore
+lasts 40 or 24 real minutes on auto-run, plus any road travel time. Use `Step 1h`
+only when you want to skip ahead manually for testing.
 
 ```powershell
 $env:OLLAMA_ORIGINS="http://localhost:5173,http://127.0.0.1:5173"
@@ -113,8 +119,8 @@ You can smoke-test Ollama outside the app with:
 Invoke-RestMethod http://localhost:11434/api/generate -Method Post -ContentType "application/json" -Body '{"model":"qwen3:8b","prompt":"Return {\"ok\":true} as JSON.","format":"json","stream":false}'
 ```
 
-The app should still run if Ollama is not available. AI is an enhancement, not a
-hard dependency for the simulation.
+The app still opens if Ollama is not available, but citizens need AI responses to
+receive new life-sim tasks.
 
 ## Design Principle
 

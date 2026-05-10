@@ -49,7 +49,9 @@ export function buildCitizenActionPrompt(city: CityState, citizen: Citizen): str
     "Allowed actions: work, rest, buy_food, help_neighbor, socialize, relocate, study, mediate_conflict, report_crime, police_patrol, arrest_citizen, hospital_treatment, exploit_market, faction_campaign, sabotage_rival, abstract_violent_bounty, abstract_eliminate_citizen.",
     "Use the Citizen ID below as citizenId. Use targetId null unless the chosen action needs another citizen.",
     "If a target is needed, choose only from Target candidates.",
-    "The simulation will validate your proposal before it can change state.",
+    "The simulation will validate your proposal, calculate road travel time, schedule it as a timed task, and only apply consequences after the task completes.",
+    "Do not include durations in JSON. Work is a 4 in-game-hour shift before any road travel time; the deterministic engine owns timing.",
+    "Do not spam repeated urgent actions. Pick one plausible life-simulation task for the next few in-game hours.",
     "For report_crime, police_patrol, arrest_citizen, hospital_treatment, describe only civic simulation consequences such as trust, case load, detention, sentence review, and recovery time.",
     "For abstract_violent_bounty or abstract_eliminate_citizen, describe only game/simulation consequences; do not include real-world methods or instructions.",
     "abstract_eliminate_citizen is a severe crisis-only action, not a profitable strategy: the actor is detained and the target has a long downtime.",
@@ -68,6 +70,7 @@ export function buildCitizenActionPrompt(city: CityState, citizen: Citizen): str
     `Sentence until tick: ${citizen.sentenceUntilTick ?? "none"}`,
     `Recovery until tick: ${citizen.recoveryUntilTick ?? "none"}`,
     `Institution ID: ${citizen.institutionId ?? "none"}`,
+    `Active task: ${JSON.stringify(city.tasks.find((task) => task.citizenId === citizen.id && task.status === "active") ?? null)}`,
     `Personality: ${JSON.stringify(citizen.personality)}`,
     `Faction ID: ${citizen.factionId ?? "none"}`,
     `Target candidates: ${JSON.stringify(targetCandidates)}`,
@@ -84,6 +87,8 @@ export function buildCitizenActionPrompt(city: CityState, citizen: Citizen): str
     `Public health: ${city.metrics.publicHealth}`,
     `Open cases: ${city.metrics.openCases}`,
     `Institutions: ${JSON.stringify(city.institutions)}`,
+    `Roads: ${JSON.stringify(city.roads)}`,
     `Factions: ${JSON.stringify(city.factions)}`,
+    `Active city tasks: ${JSON.stringify(city.tasks.filter((task) => task.status === "active"))}`,
   ].join("\n");
 }

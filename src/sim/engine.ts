@@ -4,6 +4,7 @@ import type {
   Citizen,
   CitizenAction,
   CitizenActionProposal,
+  CitizenTask,
   CityStructure,
   CityEvent,
   CityState,
@@ -36,6 +37,7 @@ const extremeEliminationTargetDowntime = 72;
 const arrestProcessingDowntime = 6;
 const standardSentenceDowntime = 18;
 const severeSentenceDowntime = 36;
+const roadUnitsPerHour = 26;
 
 export function deriveAlignment(personality: Personality): Alignment {
   if (personality.morality < 30 && personality.empathy < 35) {
@@ -55,6 +57,7 @@ export function deriveAlignment(personality: Personality): Alignment {
 
 export function advanceCity(previous: CityState): CityState {
   const next: CityState = cloneCity(previous);
+  next.tasks = normalizeTasks(next);
   next.tick += 1;
   next.hour += 1;
 
@@ -68,8 +71,23 @@ export function advanceCity(previous: CityState): CityState {
 
   for (let index = 0; index < next.citizens.length; index += 1) {
     const citizen = progressCitizenStatus(normalizeCitizen(next.citizens[index]), next, newEvents);
+    const activeTask = getActiveTaskForCitizen(next, citizen.id);
 
     if (isUnavailable(citizen, next.tick)) {
+      if (activeTask) {
+        activeTask.status = "blocked";
+        newEvents.push(
+          createEvent(
+            next,
+            citizen,
+            "AI task interrupted",
+            `${citizen.name}'s AI-proposed ${activeTask.action.replace(/_/g, " ")} task stops because institutional downtime takes priority.`,
+            "warning",
+            activeTask.targetId,
+          ),
+        );
+      }
+
       next.citizens[index] = {
         ...moveCitizen(citizen, "rest", next),
         currentAction: "rest",
@@ -80,19 +98,70 @@ export function advanceCity(previous: CityState): CityState {
       continue;
     }
 
-    const action = chooseAction(citizen, next);
-    const target = chooseTarget(citizen, action, next);
-    const updated = applyAction(citizen, action, next, newEvents, target?.id);
+    if (!activeTask) {
+      next.citizens[index] = {
+        ...moveCitizen(citizen, "rest", next),
+        currentAction: "rest",
+        hunger: clamp(citizen.hunger + 3),
+        energy: clamp(citizen.energy + 2),
+        mood: clamp(citizen.mood - 1),
+        reputation: clamp(citizen.reputation),
+      };
+      continue;
+    }
+
+    if (activeTask.completesAtTick > next.tick) {
+      const taskPhase = next.tick < activeTask.workStartsAtTick ? "travel" : "task";
+      next.citizens[index] = {
+        ...moveCitizenForTask(citizen, activeTask, next),
+        currentAction: activeTask.action,
+        hunger: clamp(citizen.hunger + 2),
+        energy: clamp(citizen.energy - (taskPhase === "travel" ? 2 : 1)),
+        mood: clamp(citizen.mood),
+        reputation: clamp(citizen.reputation),
+      };
+      continue;
+    }
+
+    const completionValidation = validateCitizenActionProposal(next, activeTask);
+
+    if (!completionValidation.valid) {
+      activeTask.status = "blocked";
+      newEvents.push(
+        createEvent(
+          next,
+          citizen,
+          "AI task blocked",
+          `${citizen.name}'s AI-proposed ${activeTask.action.replace(/_/g, " ")} task was blocked at completion: ${completionValidation.reasons.join(" ")}`,
+          "warning",
+          activeTask.targetId,
+        ),
+      );
+      next.citizens[index] = {
+        ...moveCitizen(citizen, "rest", next),
+        currentAction: "rest",
+        hunger: clamp(citizen.hunger + 3),
+        energy: clamp(citizen.energy + 1),
+        mood: clamp(citizen.mood - 2),
+      };
+      continue;
+    }
+
+    const arrivedCitizen = moveCitizenForTask(citizen, activeTask, next);
+    const updated = applyAction(arrivedCitizen, activeTask.action, next, newEvents, activeTask.targetId);
+    activeTask.status = "completed";
 
     next.citizens[index] = {
-      ...moveCitizen(updated, action, next, target?.id),
-      currentAction: action,
+      ...moveCitizenForTask(updated, activeTask, next),
+      currentAction: activeTask.action,
       hunger: clamp(updated.hunger + 5),
       energy: clamp(updated.energy - 3),
       mood: clamp(updated.mood),
       reputation: clamp(updated.reputation),
     };
   }
+
+  next.tasks = next.tasks.slice(-48);
 
   next.resources.food = Math.max(0, next.resources.food - 1);
   applyScenarioDrift(next, newEvents);
@@ -137,6 +206,13 @@ export function validateCitizenActionProposal(
 
   if (citizen.status !== "active" && isUnavailable(citizen, city.tick)) {
     reasons.push("Inactive citizens cannot start new actions.");
+  }
+
+  const activeTask = getActiveTaskForCitizen(city, proposal.citizenId);
+  const proposalTaskId = typeof (proposal as Partial<CitizenTask>).id === "string" ? (proposal as Partial<CitizenTask>).id : undefined;
+
+  if (activeTask && activeTask.id !== proposalTaskId) {
+    reasons.push(`Citizen is already busy with ${activeTask.action.replace(/_/g, " ")} until tick ${activeTask.completesAtTick}.`);
   }
 
   if (!structureForAction(city, normalizeCitizen(citizen), proposal.action, proposal.targetId)) {
@@ -261,6 +337,10 @@ export function validateCitizenActionProposal(
 }
 
 export function applyCitizenActionProposal(city: CityState, proposal: CitizenActionProposal): CityState {
+  return scheduleCitizenActionProposal(city, proposal);
+}
+
+export function scheduleCitizenActionProposal(city: CityState, proposal: CitizenActionProposal): CityState {
   const validation = validateCitizenActionProposal(city, proposal);
 
   if (!validation.valid) {
@@ -268,6 +348,7 @@ export function applyCitizenActionProposal(city: CityState, proposal: CitizenAct
   }
 
   const next = cloneCity(city);
+  next.tasks = normalizeTasks(next);
   const events: CityEvent[] = [];
   const citizen = next.citizens.find((item) => item.id === proposal.citizenId);
 
@@ -275,14 +356,120 @@ export function applyCitizenActionProposal(city: CityState, proposal: CitizenAct
     return city;
   }
 
-  const updated = applyAction(citizen, proposal.action, next, events, proposal.targetId);
+  const timing = taskTimingForProposal(next, citizen, proposal.action, proposal.targetId);
+  const task: CitizenTask = {
+    id: createId("task"),
+    citizenId: proposal.citizenId,
+    action: proposal.action,
+    targetId: proposal.targetId,
+    reason: proposal.reason,
+    proposedBy: "ai",
+    status: "active",
+    proposedAtTick: next.tick,
+    startedAtTick: next.tick,
+    completesAtTick: next.tick + timing.durationTicks,
+    durationTicks: timing.durationTicks,
+    baseDurationTicks: timing.baseDurationTicks,
+    travelDurationTicks: timing.travelDurationTicks,
+    travelDistance: timing.travelDistance,
+    workStartsAtTick: next.tick + timing.travelDurationTicks,
+    originStructureId: timing.originStructureId,
+    destinationStructureId: timing.destinationStructureId,
+    routeStructureIds: timing.routeStructureIds,
+    validationWarnings: validation.warnings,
+  };
 
+  next.tasks = [...next.tasks, task];
   next.citizens = next.citizens.map((item) =>
-    item.id === updated.id ? { ...moveCitizen(updated, proposal.action, next, proposal.targetId), currentAction: proposal.action } : item,
+    item.id === citizen.id ? { ...item, currentAction: proposal.action } : item,
+  );
+  events.push(
+    createEvent(
+      next,
+      citizen,
+      "AI task started",
+      `${citizen.name} starts the AI-proposed ${proposal.action.replace(/_/g, " ")} task: ${task.travelDurationTicks}h travel plus ${task.baseDurationTicks}h on task, until tick ${task.completesAtTick}.`,
+      "info",
+      proposal.targetId,
+    ),
   );
   next.events = [...events, ...next.events].slice(0, 24);
 
   return next;
+}
+
+export function getActiveTaskForCitizen(city: CityState, citizenId: string): CitizenTask | undefined {
+  return (city.tasks ?? []).find((task) => task.citizenId === citizenId && task.status === "active");
+}
+
+export function canCitizenReceiveAiTask(city: CityState, citizenId: string): boolean {
+  const citizen = city.citizens.find((item) => item.id === citizenId);
+
+  return Boolean(citizen && citizen.status === "active" && !isUnavailable(citizen, city.tick) && !getActiveTaskForCitizen(city, citizenId));
+}
+
+export function taskDurationTicks(action: CitizenAction): number {
+  switch (action) {
+    case "buy_food":
+      return 1;
+    case "rest":
+    case "report_crime":
+      return 2;
+    case "help_neighbor":
+    case "socialize":
+    case "relocate":
+    case "arrest_citizen":
+      return 3;
+    case "work":
+    case "study":
+    case "mediate_conflict":
+    case "police_patrol":
+    case "hospital_treatment":
+    case "exploit_market":
+    case "faction_campaign":
+    case "sabotage_rival":
+      return 4;
+    case "abstract_violent_bounty":
+      return 8;
+    case "abstract_eliminate_citizen":
+      return 12;
+    default:
+      return 3;
+  }
+}
+
+function taskTimingForProposal(
+  city: CityState,
+  citizen: Citizen,
+  action: CitizenAction,
+  targetId?: string,
+): {
+  baseDurationTicks: number;
+  destinationStructureId?: string;
+  durationTicks: number;
+  originStructureId?: string;
+  routeStructureIds: string[];
+  travelDistance: number;
+  travelDurationTicks: number;
+} {
+  const normalizedCitizen = normalizeCitizen(citizen);
+  const origin = nearestStructureToPosition(city, normalizedCitizen.position) ?? structureForDistrict(city, normalizedCitizen.districtId);
+  const destination = actionDestinationStructure(city, normalizedCitizen, action, targetId);
+  const route = origin && destination ? shortestRoadRoute(city, origin.id, destination.id) : undefined;
+  const routeStructureIds = route?.structureIds ?? [origin?.id, destination?.id].filter((id): id is string => Boolean(id));
+  const travelDistance = roundPosition(route?.distance ?? directStructureDistance(origin, destination));
+  const travelDurationTicks = origin && destination && origin.id !== destination.id ? Math.min(6, Math.max(1, Math.ceil(travelDistance / roadUnitsPerHour))) : 0;
+  const baseDurationTicks = taskDurationTicks(action);
+
+  return {
+    baseDurationTicks,
+    destinationStructureId: destination?.id,
+    durationTicks: baseDurationTicks + travelDurationTicks,
+    originStructureId: origin?.id,
+    routeStructureIds,
+    travelDistance,
+    travelDurationTicks,
+  };
 }
 
 export function updateCitizenPersonality(
@@ -307,77 +494,6 @@ export function updateCitizenPersonality(
       };
     }),
   };
-}
-
-function chooseAction(citizen: Citizen, city: CityState): CitizenAction {
-  const alignment = deriveAlignment(citizen.personality);
-  const faction = city.factions.find((item) => item.id === citizen.factionId);
-  const conflictRisk = city.scenario.conflictPressure + (faction?.hostility ?? 0) / 2;
-
-  if (citizen.hunger > 68 && citizen.money >= 4 && city.resources.food > 0) {
-    return "buy_food";
-  }
-
-  if (citizen.energy < 34) {
-    return "rest";
-  }
-
-  if (citizen.mood < 38 && citizen.personality.empathy > 45) {
-    return "socialize";
-  }
-
-  if (city.scenario.conflictPressure > 62 && alignment === "principled") {
-    return "mediate_conflict";
-  }
-
-  if (citizen.role === "medic" && city.metrics.publicHealth < 78) {
-    return "hospital_treatment";
-  }
-
-  if (citizen.role === "officer") {
-    if (city.metrics.openCases > 0 && city.scenario.conflictPressure > 55) {
-      return "arrest_citizen";
-    }
-
-    if (city.metrics.publicSafety < 82 || city.scenario.conflictPressure > 52) {
-      return "police_patrol";
-    }
-  }
-
-  if (
-    alignment !== "ruthless" &&
-    city.scenario.conflictPressure > 50 &&
-    city.metrics.openCases < 8 &&
-    Math.abs(hashString(`${citizen.id}:${city.tick}:report`)) % 7 === 0
-  ) {
-    return "report_crime";
-  }
-
-  if (alignment === "ruthless" && citizen.personality.ambition > 65) {
-    if (citizen.personality.risk > 58 && conflictRisk > 70) {
-      return "sabotage_rival";
-    }
-
-    return "exploit_market";
-  }
-
-  if (citizen.personality.ambition > 60 && faction && faction.influence < 75) {
-    return "faction_campaign";
-  }
-
-  if (alignment === "principled" && citizen.personality.empathy > 70) {
-    return "help_neighbor";
-  }
-
-  if (citizen.energy > 64 && citizen.hunger < 62 && citizen.personality.risk > 50) {
-    return "relocate";
-  }
-
-  if (citizen.personality.ambition > 55 && citizen.energy > 58) {
-    return "study";
-  }
-
-  return "work";
 }
 
 function applyAction(
@@ -727,29 +843,6 @@ function applyAction(
   }
 }
 
-function chooseTarget(citizen: Citizen, action: CitizenAction, city: CityState): Citizen | undefined {
-  if (action === "hospital_treatment") {
-    return chooseTreatmentTarget(city, citizen.id);
-  }
-
-  if (
-    action !== "arrest_citizen" &&
-    action !== "sabotage_rival" &&
-    action !== "abstract_violent_bounty" &&
-    action !== "abstract_eliminate_citizen"
-  ) {
-    return undefined;
-  }
-
-  return city.citizens
-    .filter((item) => item.id !== citizen.id && !isUnavailable(item, city.tick))
-    .sort((left, right) => scoreTarget(right, citizen) - scoreTarget(left, citizen))[0];
-}
-
-function scoreTarget(target: Citizen, actor: Citizen): number {
-  return 100 - target.reputation + target.money / 2 + (target.factionId !== actor.factionId ? 20 : 0);
-}
-
 function incapacitateTarget(
   city: CityState,
   actor: Citizen,
@@ -877,6 +970,20 @@ function institutionalMoodDelta(citizen: Citizen): number {
   return -1;
 }
 
+function moveCitizenForTask(citizen: Citizen, task: CitizenTask, city: CityState): Citizen {
+  const destinationTarget = destinationTargetForAction(citizen, task.action, city, task.targetId);
+  const elapsedTravel = Math.max(0, Math.min(task.travelDurationTicks, city.tick - task.startedAtTick));
+  const arrived = task.travelDurationTicks === 0 || city.tick >= task.workStartsAtTick;
+  const position = arrived ? destinationTarget.position : positionAlongTaskRoute(city, task, elapsedTravel / task.travelDurationTicks);
+
+  return {
+    ...citizen,
+    districtId: arrived ? destinationTarget.districtId : citizen.districtId,
+    destinationDistrictId: destinationTarget.districtId,
+    position,
+  };
+}
+
 function moveCitizen(citizen: Citizen, action: CitizenAction, city: CityState, targetId?: string): Citizen {
   const destinationTarget = destinationTargetForAction(citizen, action, city, targetId);
   const destinationDistrictId = destinationTarget.districtId;
@@ -894,6 +1001,49 @@ function moveCitizen(citizen: Citizen, action: CitizenAction, city: CityState, t
       y: roundPosition(arrived ? destination.y : y),
     },
   };
+}
+
+function positionAlongTaskRoute(city: CityState, task: CitizenTask, ratio: number): Citizen["position"] {
+  const points = task.routeStructureIds
+    .map((structureId) => city.structures.find((structure) => structure.id === structureId)?.position)
+    .filter((position): position is Citizen["position"] => Boolean(position));
+
+  if (points.length === 0) {
+    const citizen = city.citizens.find((item) => item.id === task.citizenId);
+    return citizen?.position ?? { x: 50, y: 50 };
+  }
+
+  if (points.length === 1) {
+    return points[0];
+  }
+
+  const segmentLengths = points.slice(1).map((point, index) => distanceBetween(points[index], point));
+  const totalDistance = segmentLengths.reduce((sum, distance) => sum + distance, 0);
+
+  if (totalDistance <= 0) {
+    return points[points.length - 1];
+  }
+
+  let remainingDistance = totalDistance * Math.min(1, Math.max(0, ratio));
+
+  for (let index = 0; index < segmentLengths.length; index += 1) {
+    const segmentDistance = segmentLengths[index];
+
+    if (remainingDistance <= segmentDistance) {
+      const start = points[index];
+      const end = points[index + 1];
+      const segmentRatio = segmentDistance <= 0 ? 1 : remainingDistance / segmentDistance;
+
+      return {
+        x: roundPosition(start.x + (end.x - start.x) * segmentRatio),
+        y: roundPosition(start.y + (end.y - start.y) * segmentRatio),
+      };
+    }
+
+    remainingDistance -= segmentDistance;
+  }
+
+  return points[points.length - 1];
 }
 
 function destinationTargetForAction(
@@ -1004,6 +1154,122 @@ function structureForDistrict(
   );
 }
 
+function actionDestinationStructure(
+  city: CityState,
+  citizen: Citizen,
+  action: CitizenAction,
+  targetId?: string,
+): CityStructure | undefined {
+  const structure = structureForAction(city, citizen, action, targetId);
+
+  if (structure) {
+    return structure;
+  }
+
+  return structureForDistrict(city, destinationForAction(citizen, action, city, targetId));
+}
+
+function nearestStructureToPosition(city: CityState, position: Citizen["position"]): CityStructure | undefined {
+  return [...city.structures].sort(
+    (left, right) => distanceBetween(left.position, position) - distanceBetween(right.position, position),
+  )[0];
+}
+
+function shortestRoadRoute(
+  city: CityState,
+  originStructureId: string,
+  destinationStructureId: string,
+): { distance: number; structureIds: string[] } | undefined {
+  if (originStructureId === destinationStructureId) {
+    return {
+      distance: 0,
+      structureIds: [originStructureId],
+    };
+  }
+
+  const queue = [{ distance: 0, structureId: originStructureId, structureIds: [originStructureId] }];
+  const bestDistances = new Map<string, number>([[originStructureId, 0]]);
+
+  while (queue.length > 0) {
+    queue.sort((left, right) => left.distance - right.distance);
+    const current = queue.shift();
+
+    if (!current) {
+      break;
+    }
+
+    if (current.structureId === destinationStructureId) {
+      return {
+        distance: current.distance,
+        structureIds: current.structureIds,
+      };
+    }
+
+    for (const next of connectedRoads(city, current.structureId)) {
+      const distance = current.distance + next.distance;
+      const knownDistance = bestDistances.get(next.structureId);
+
+      if (knownDistance !== undefined && knownDistance <= distance) {
+        continue;
+      }
+
+      bestDistances.set(next.structureId, distance);
+      queue.push({
+        distance,
+        structureId: next.structureId,
+        structureIds: [...current.structureIds, next.structureId],
+      });
+    }
+  }
+
+  const origin = city.structures.find((structure) => structure.id === originStructureId);
+  const destination = city.structures.find((structure) => structure.id === destinationStructureId);
+
+  if (!origin || !destination) {
+    return undefined;
+  }
+
+  return {
+    distance: directStructureDistance(origin, destination),
+    structureIds: [origin.id, destination.id],
+  };
+}
+
+function connectedRoads(city: CityState, structureId: string): Array<{ distance: number; structureId: string }> {
+  return (city.roads ?? []).flatMap((road) => {
+    if (road.fromStructureId !== structureId && road.toStructureId !== structureId) {
+      return [];
+    }
+
+    const nextStructureId = road.fromStructureId === structureId ? road.toStructureId : road.fromStructureId;
+    const from = city.structures.find((structure) => structure.id === structureId);
+    const to = city.structures.find((structure) => structure.id === nextStructureId);
+
+    if (!from || !to) {
+      return [];
+    }
+
+    return [
+      {
+        distance: directStructureDistance(from, to) * (road.travelMultiplier ?? 1),
+        structureId: nextStructureId,
+      },
+    ];
+  });
+}
+
+function directStructureDistance(left?: CityStructure, right?: CityStructure): number {
+  if (!left || !right) {
+    return 0;
+  }
+
+  return distanceBetween(left.position, right.position);
+}
+
+function distanceBetween(left: Citizen["position"], right: Citizen["position"]): number {
+  return Math.hypot(left.x - right.x, left.y - right.y);
+}
+
 function chooseRelocationDistrict(citizen: Citizen, city: CityState): CityState["districts"][number] {
   const districtIndex = Math.abs(hashString(`${citizen.id}:${city.tick}`)) % city.districts.length;
   return city.districts[districtIndex] ?? city.districts[0];
@@ -1013,28 +1279,28 @@ function structurePosition(structure: CityStructure, citizenId: string): Citizen
   const offset = Math.abs(hashString(`${structure.id}:${citizenId}`));
 
   return {
-    x: clampMap(structure.position.x + ((offset % 7) - 3) * 0.8),
-    y: clampMap(structure.position.y + (((offset / 7) % 7) - 3) * 0.8),
+    x: clampMap(structure.position.x + ((offset % 7) - 3) * 0.45),
+    y: clampMap(structure.position.y + (((offset / 7) % 7) - 3) * 0.45),
   };
 }
 
 function districtPosition(districtId: string, citizenId: string): Citizen["position"] {
   const basePositions: Record<string, Citizen["position"]> = {
-    homes: { x: 42, y: 20 },
-    farm: { x: 69, y: 73 },
-    market: { x: 79, y: 66 },
-    civic: { x: 50, y: 42 },
-    workshop: { x: 57, y: 66 },
-    hospital: { x: 21, y: 20 },
-    police: { x: 21, y: 42 },
-    prison: { x: 83, y: 20 },
+    homes: { x: 16.2, y: 65.8 },
+    farm: { x: 73.0, y: 80.1 },
+    market: { x: 83.2, y: 67.1 },
+    civic: { x: 49.4, y: 38.8 },
+    workshop: { x: 49.5, y: 84.1 },
+    hospital: { x: 21.3, y: 20.6 },
+    police: { x: 18.0, y: 45.6 },
+    prison: { x: 78.2, y: 18.4 },
   };
   const base = basePositions[districtId] ?? { x: 50, y: 50 };
   const offset = Math.abs(hashString(citizenId));
 
   return {
-    x: clampMap(base.x + ((offset % 9) - 4) * 1.4),
-    y: clampMap(base.y + (((offset / 9) % 9) - 4) * 1.4),
+    x: clampMap(base.x + ((offset % 9) - 4) * 0.65),
+    y: clampMap(base.y + (((offset / 9) % 9) - 4) * 0.65),
   };
 }
 
@@ -1285,4 +1551,27 @@ function clamp(value: number): number {
 
 function cloneCity(city: CityState): CityState {
   return JSON.parse(JSON.stringify(city)) as CityState;
+}
+
+function normalizeTasks(city: CityState): CitizenTask[] {
+  if (!Array.isArray(city.tasks)) {
+    return [];
+  }
+
+  return city.tasks.map((task) => {
+    const legacyTask = task as Partial<CitizenTask>;
+    const baseDurationTicks = legacyTask.baseDurationTicks ?? legacyTask.durationTicks ?? taskDurationTicks(task.action);
+    const travelDurationTicks = legacyTask.travelDurationTicks ?? 0;
+    const workStartsAtTick = legacyTask.workStartsAtTick ?? task.startedAtTick + travelDurationTicks;
+
+    return {
+      ...task,
+      baseDurationTicks,
+      travelDurationTicks,
+      travelDistance: legacyTask.travelDistance ?? 0,
+      workStartsAtTick,
+      routeStructureIds: legacyTask.routeStructureIds ?? [],
+      durationTicks: legacyTask.durationTicks ?? baseDurationTicks + travelDurationTicks,
+    };
+  });
 }

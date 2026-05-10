@@ -13,25 +13,26 @@ import {
   Play,
   Plus,
   RotateCcw,
-  ShieldAlert,
   Sparkles,
   UsersRound,
   X,
 } from "lucide-react";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { OllamaProvider } from "../ai/ollama";
 import {
   advanceCity,
-  applyCitizenActionProposal,
+  canCitizenReceiveAiTask,
   deriveAlignment,
+  getActiveTaskForCitizen,
+  scheduleCitizenActionProposal,
   updateCitizenPersonality,
   validateCitizenActionProposal,
 } from "../sim/engine";
 import { initialCityState } from "../sim/seed";
 import type {
   Citizen,
-  CitizenAction,
   CitizenActionProposal,
+  CitizenTask,
   CityEvent,
   CityState,
   Personality,
@@ -40,6 +41,16 @@ import type {
 } from "../sim/types";
 
 type AppView = "overview" | "map" | "citizens" | "events";
+type AiRequestSource = "auto" | "manual";
+
+interface AiRequestStatus {
+  error: string;
+  loading: boolean;
+  proposal?: CitizenActionProposal;
+  lastRequestedTick?: number;
+  lastScheduledTick?: number;
+  source?: AiRequestSource;
+}
 
 const resourceLabels: Record<ResourceKey, string> = {
   food: "Food",
@@ -47,32 +58,18 @@ const resourceLabels: Record<ResourceKey, string> = {
   credits: "Credits",
 };
 
-const actionOptions: { action: CitizenAction; label: string; needsTarget?: boolean }[] = [
-  { action: "work", label: "Work" },
-  { action: "rest", label: "Rest" },
-  { action: "buy_food", label: "Buy food" },
-  { action: "help_neighbor", label: "Help neighbor" },
-  { action: "socialize", label: "Socialize" },
-  { action: "relocate", label: "Relocate" },
-  { action: "study", label: "Study" },
-  { action: "mediate_conflict", label: "Mediate conflict" },
-  { action: "report_crime", label: "Report crime" },
-  { action: "police_patrol", label: "Police patrol" },
-  { action: "arrest_citizen", label: "Arrest citizen", needsTarget: true },
-  { action: "hospital_treatment", label: "Hospital treatment", needsTarget: true },
-  { action: "exploit_market", label: "Exploit market" },
-  { action: "faction_campaign", label: "Faction campaign" },
-  { action: "sabotage_rival", label: "Sabotage rival", needsTarget: true },
-  { action: "abstract_eliminate_citizen", label: "Eliminate (severe)", needsTarget: true },
-];
-
 const speedOptions = [
-  { label: "6x", value: 6, intervalMs: 10000 },
-  { label: "10x", value: 10, intervalMs: 6000 },
+  { label: "6x", value: 6, intervalMs: 600000 },
+  { label: "10x", value: 10, intervalMs: 360000 },
 ];
 
-const mapAspectRatio = 1672 / 941;
-const mapInverseAspectRatio = 941 / 1672;
+const aiRetryCooldownTicks = 4;
+const aiAutonomousBatchSize = 2;
+
+const mapPixelWidth = 3344;
+const mapPixelHeight = 1882;
+const mapAspectRatio = mapPixelWidth / mapPixelHeight;
+const mapInverseAspectRatio = mapPixelHeight / mapPixelWidth;
 
 const aiProvider = new OllamaProvider();
 
@@ -84,6 +81,10 @@ export function App() {
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [autoRun, setAutoRun] = useState(true);
   const [timeSpeed, setTimeSpeed] = useState(10);
+  const [aiRequestStatus, setAiRequestStatus] = useState<Record<string, AiRequestStatus>>({});
+  const aiRequestRef = useRef(new Set<string>());
+  const aiRetryRef = useRef<Record<string, number>>({});
+  const autoDispatchTickRef = useRef<number | null>(null);
   const selectedCitizen = city.citizens.find((citizen) => citizen.id === selectedCitizenId) ?? city.citizens[0];
   const templateView = getTemplateView();
   const selectedSpeed = speedOptions.find((option) => option.value === timeSpeed) ?? speedOptions[1];
@@ -110,27 +111,110 @@ export function App() {
     return () => window.clearInterval(timer);
   }, [autoRun, selectedSpeed.intervalMs]);
 
-  function handleAdvance() {
-    setCity((current) => advanceCity(current));
-  }
+  const requestAiTask = useCallback(
+    async (citizenId: string, source: AiRequestSource = "manual") => {
+      const citizen = city.citizens.find((item) => item.id === citizenId);
+      const lastRequestTick = aiRetryRef.current[citizenId];
 
-  function handleApplyCitizenAction(action: CitizenAction, targetId?: string) {
-    if (!selectedCitizen) {
+      if (!citizen || aiRequestRef.current.has(citizenId) || !canCitizenReceiveAiTask(city, citizenId)) {
+        return;
+      }
+
+      if (source === "auto" && typeof lastRequestTick === "number" && city.tick - lastRequestTick < aiRetryCooldownTicks) {
+        return;
+      }
+
+      aiRequestRef.current.add(citizenId);
+      aiRetryRef.current[citizenId] = city.tick;
+      setAiRequestStatus((current) => ({
+        ...current,
+        [citizenId]: {
+          ...current[citizenId],
+          error: "",
+          loading: true,
+          lastRequestedTick: city.tick,
+          source,
+        },
+      }));
+
+      try {
+        const proposal = await aiProvider.proposeCitizenAction(city, citizenId);
+        const normalizedProposal: CitizenActionProposal = {
+          ...proposal,
+          citizenId,
+          targetId: proposal.targetId || undefined,
+          reason: proposal.reason || "AI proposed this task from the current city state.",
+        };
+        let scheduled = false;
+        let error = "";
+
+        setCity((current) => {
+          const validation = validateCitizenActionProposal(current, normalizedProposal);
+
+          if (!validation.valid) {
+            error = validation.reasons.join(" ");
+            return current;
+          }
+
+          const next = scheduleCitizenActionProposal(current, normalizedProposal);
+          scheduled = next !== current;
+          return next;
+        });
+
+        setAiRequestStatus((current) => ({
+          ...current,
+          [citizenId]: {
+            error,
+            loading: false,
+            proposal: normalizedProposal,
+            lastRequestedTick: city.tick,
+            lastScheduledTick: scheduled ? city.tick : current[citizenId]?.lastScheduledTick,
+            source,
+          },
+        }));
+      } catch (error) {
+        setAiRequestStatus((current) => ({
+          ...current,
+          [citizenId]: {
+            ...current[citizenId],
+            error: error instanceof Error ? error.message : "Ollama request failed.",
+            loading: false,
+            source,
+          },
+        }));
+      } finally {
+        aiRequestRef.current.delete(citizenId);
+      }
+    },
+    [city],
+  );
+
+  useEffect(() => {
+    if (!autoRun || autoDispatchTickRef.current === city.tick) {
       return;
     }
 
-    setCity((current) =>
-      applyCitizenActionProposal(current, {
-        citizenId: selectedCitizen.id,
-        action,
-        targetId,
-        reason: "Manual player choice from citizen controls.",
-      }),
-    );
-  }
+    const citizensReadyForAi = city.citizens
+      .filter((citizen) => canCitizenReceiveAiTask(city, citizen.id))
+      .filter((citizen) => !aiRequestRef.current.has(citizen.id))
+      .filter((citizen) => {
+        const lastRequestTick = aiRetryRef.current[citizen.id];
+        return typeof lastRequestTick !== "number" || city.tick - lastRequestTick >= aiRetryCooldownTicks;
+      })
+      .slice(0, aiAutonomousBatchSize);
 
-  function handleApplyCitizenProposal(proposal: CitizenActionProposal) {
-    setCity((current) => applyCitizenActionProposal(current, proposal));
+    if (citizensReadyForAi.length === 0) {
+      return;
+    }
+
+    autoDispatchTickRef.current = city.tick;
+    citizensReadyForAi.forEach((citizen) => {
+      void requestAiTask(citizen.id, "auto");
+    });
+  }, [autoRun, city, requestAiTask]);
+
+  function handleAdvance() {
+    setCity((current) => advanceCity(current));
   }
 
   function handlePersonalityChange(key: keyof Personality, value: number) {
@@ -154,19 +238,10 @@ export function App() {
 
     return (
       <AiProposalTemplate
+        aiRequestStatus={aiRequestStatus[templateCitizen.id]}
         city={city}
         citizen={templateCitizen}
-        onApplyCitizenAction={(action, targetId) =>
-          setCity((current) =>
-            applyCitizenActionProposal(current, {
-              citizenId: templateCitizen.id,
-              action,
-              targetId,
-              reason: "Manual player choice from citizen controls.",
-            }),
-          )
-        }
-        onApplyCitizenProposal={handleApplyCitizenProposal}
+        onRequestAiTask={requestAiTask}
       />
     );
   }
@@ -244,8 +319,8 @@ export function App() {
           city={city}
           onPersonalityChange={handlePersonalityChange}
           onSelectCitizen={setSelectedCitizenId}
-          onApplyCitizenAction={handleApplyCitizenAction}
-          onApplyCitizenProposal={handleApplyCitizenProposal}
+          onRequestAiTask={requestAiTask}
+          aiRequestStatus={aiRequestStatus[selectedCitizen.id]}
           selectedCitizen={selectedCitizen}
           selectedCitizenId={selectedCitizenId}
         />
@@ -411,6 +486,11 @@ function FullscreenMapView({
         </section>
 
         <section className="drawer-section">
+          <PanelTitle eyebrow="Roads" title="Network" />
+          <RoadList city={city} />
+        </section>
+
+        <section className="drawer-section">
           <PanelTitle eyebrow="Structures" title="Functions" />
           <StructureList city={city} />
         </section>
@@ -507,18 +587,18 @@ function OverviewView({
 }
 
 function CitizensView({
+  aiRequestStatus,
   city,
-  onApplyCitizenAction,
-  onApplyCitizenProposal,
   onPersonalityChange,
+  onRequestAiTask,
   onSelectCitizen,
   selectedCitizen,
   selectedCitizenId,
 }: {
+  aiRequestStatus?: AiRequestStatus;
   city: CityState;
-  onApplyCitizenAction: (action: CitizenAction, targetId?: string) => void;
-  onApplyCitizenProposal: (proposal: CitizenActionProposal) => void;
   onPersonalityChange: (key: keyof Personality, value: number) => void;
+  onRequestAiTask: (citizenId: string, source?: AiRequestSource) => void;
   onSelectCitizen: (citizenId: string) => void;
   selectedCitizen: Citizen;
   selectedCitizenId: string;
@@ -557,10 +637,10 @@ function CitizensView({
       <section className="panel citizen-notes-panel">
         <PanelTitle eyebrow="Controls" title="Citizen choice" />
         <CitizenActionControls
+          aiRequestStatus={aiRequestStatus}
           city={city}
           citizen={selectedCitizen}
-          onApplyCitizenAction={onApplyCitizenAction}
-          onApplyCitizenProposal={onApplyCitizenProposal}
+          onRequestAiTask={onRequestAiTask}
         />
       </section>
 
@@ -685,142 +765,59 @@ function ViewTab({
 }
 
 function CitizenActionControls({
+  aiRequestStatus,
   city,
   citizen,
-  onApplyCitizenAction,
-  onApplyCitizenProposal,
+  onRequestAiTask,
 }: {
+  aiRequestStatus?: AiRequestStatus;
   city: CityState;
   citizen: Citizen;
-  onApplyCitizenAction: (action: CitizenAction, targetId?: string) => void;
-  onApplyCitizenProposal: (proposal: CitizenActionProposal) => void;
+  onRequestAiTask: (citizenId: string, source?: AiRequestSource) => void;
 }) {
-  const firstTarget = city.citizens.find((item) => item.id !== citizen.id)?.id ?? "";
-  const [selectedAction, setSelectedAction] = useState<CitizenAction>("work");
-  const [targetId, setTargetId] = useState(firstTarget);
-  const [aiProposal, setAiProposal] = useState<CitizenActionProposal | null>(null);
-  const [aiError, setAiError] = useState("");
-  const [aiLoading, setAiLoading] = useState(false);
-  const [aiApplied, setAiApplied] = useState(false);
-  const option = actionOptions.find((item) => item.action === selectedAction);
-  const effectiveTargetId = option?.needsTarget ? targetId : undefined;
-  const validation = useMemo(
-    () =>
-      validateCitizenActionProposal(city, {
-        citizenId: citizen.id,
-        action: selectedAction,
-        targetId: effectiveTargetId,
-        reason: "Manual player choice from citizen controls.",
-      }),
-    [city, citizen.id, effectiveTargetId, selectedAction],
-  );
+  const activeTask = getActiveTaskForCitizen(city, citizen.id);
+  const aiProposal = aiRequestStatus?.proposal;
   const aiValidation = useMemo(
-    () => (aiProposal ? validateCitizenActionProposal(city, aiProposal) : undefined),
-    [aiProposal, city],
+    () => (aiProposal && !activeTask ? validateCitizenActionProposal(city, aiProposal) : undefined),
+    [activeTask, aiProposal, city],
   );
   const aiProposalMatchesCitizen = aiProposal?.citizenId === citizen.id;
-  const canApplyAiProposal = Boolean(aiProposal && aiValidation?.valid && aiProposalMatchesCitizen && !aiLoading);
-  const disabled = !validation.valid;
-
-  useEffect(() => {
-    if (targetId && targetId !== citizen.id) {
-      return;
-    }
-
-    setTargetId(firstTarget);
-  }, [citizen.id, firstTarget, targetId]);
-
-  useEffect(() => {
-    setAiProposal(null);
-    setAiError("");
-    setAiApplied(false);
-  }, [citizen.id]);
-
-  async function handleAskAi() {
-    setAiLoading(true);
-    setAiError("");
-    setAiApplied(false);
-
-    try {
-      const proposal = await aiProvider.proposeCitizenAction(city, citizen.id);
-      setAiProposal(proposal);
-    } catch (error) {
-      setAiProposal(null);
-      setAiError(error instanceof Error ? error.message : "Ollama request failed.");
-    } finally {
-      setAiLoading(false);
-    }
-  }
-
-  function handleApplyAiProposal() {
-    if (!aiProposal || !canApplyAiProposal) {
-      return;
-    }
-
-    onApplyCitizenProposal(aiProposal);
-    setAiApplied(true);
-  }
+  const canRequestAiTask = canCitizenReceiveAiTask(city, citizen.id) && !aiRequestStatus?.loading;
 
   return (
     <div className="action-controls">
-      <section className="manual-action-card" aria-label="Manual action">
-        <label className="field-control">
-          <span>Action</span>
-          <select value={selectedAction} onChange={(event) => setSelectedAction(event.target.value as CitizenAction)}>
-            {actionOptions.map((item) => (
-              <option key={item.action} value={item.action}>
-                {item.label}
-              </option>
-            ))}
-          </select>
-        </label>
-
-        {option?.needsTarget ? (
-          <label className="field-control">
-            <span>Target</span>
-            <select value={targetId} onChange={(event) => setTargetId(event.target.value)}>
-              {city.citizens
-                .filter((item) => item.id !== citizen.id)
-                .map((item) => (
-                  <option key={item.id} value={item.id}>
-                    {item.name}
-                  </option>
-                ))}
-            </select>
-          </label>
-        ) : null}
-
-        <button
-          className="primary-button full-width-button"
-          disabled={disabled}
-          type="button"
-          onClick={() => onApplyCitizenAction(selectedAction, effectiveTargetId)}
-        >
-          <ShieldAlert size={18} />
-          Apply validated action
-        </button>
-
-        <ValidationMessage validation={validation} />
-      </section>
-
       <section className="ai-action-card" aria-label="AI action proposal">
         <div className="ai-action-header">
           <div>
             <p className="eyebrow">Local AI</p>
-            <h3>Ollama proposal</h3>
+            <h3>Task proposal</h3>
           </div>
-          <span className="status-chip">validated before apply</span>
+          <span className="status-chip">{activeTask ? "busy" : "AI gated"}</span>
         </div>
 
-        <button className="secondary-button full-width-button" disabled={aiLoading} type="button" onClick={handleAskAi}>
+        {activeTask ? <TaskStatus task={activeTask} tick={city.tick} /> : null}
+
+        <button
+          className="secondary-button full-width-button"
+          disabled={!canRequestAiTask}
+          type="button"
+          onClick={() => onRequestAiTask(citizen.id, "manual")}
+        >
           <Sparkles size={18} />
-          {aiLoading ? "Asking Ollama..." : "Ask AI"}
+          {aiRequestStatus?.loading ? "Asking Ollama..." : "Ask AI for next task"}
         </button>
 
-        {aiError ? (
+        {!canRequestAiTask && !activeTask && !aiRequestStatus?.loading ? (
+          <div className="validation-message is-risk">
+            <strong>AI request blocked</strong>
+            <span>This citizen cannot receive a new task until the deterministic rules say they are free.</span>
+          </div>
+        ) : null}
+
+        {aiRequestStatus?.error ? (
           <div className="validation-message is-risk">
             <strong>Ollama unavailable or invalid response</strong>
-            <span>{aiError}</span>
+            <span>{aiRequestStatus.error}</span>
           </div>
         ) : null}
 
@@ -844,25 +841,38 @@ function CitizenActionControls({
               </div>
             ) : null}
 
-            {aiApplied ? (
+            {aiRequestStatus?.lastScheduledTick !== undefined ? (
               <div className="validation-message is-good">
-                <strong>Applied through simulation rules</strong>
-                <span>The AI proposal was passed to the deterministic apply function.</span>
+                <strong>Scheduled through simulation time</strong>
+                <span>The proposal became a task and will apply only after its completion tick.</span>
               </div>
             ) : null}
-
-            <button
-              className="primary-button full-width-button"
-              disabled={!canApplyAiProposal}
-              type="button"
-              onClick={handleApplyAiProposal}
-            >
-              <ShieldAlert size={18} />
-              Apply AI proposal
-            </button>
           </div>
         ) : null}
       </section>
+    </div>
+  );
+}
+
+function TaskStatus({ task, tick }: { task: CitizenTask; tick: number }) {
+  const remainingTicks = Math.max(0, task.completesAtTick - tick);
+  const travelRemaining = Math.max(0, Math.min(task.travelDurationTicks, task.workStartsAtTick - tick));
+  const taskRemaining = Math.max(0, remainingTicks - travelRemaining);
+  const phase = travelRemaining > 0 ? "traveling" : "on task";
+
+  return (
+    <div className="validation-message is-good">
+      <strong>
+        {formatAction(task.action)} {phase}
+      </strong>
+      <span>
+        {task.travelDurationTicks}h travel + {task.baseDurationTicks}h task = {task.durationTicks}h total.
+      </span>
+      <span>
+        Task starts tick {task.workStartsAtTick}; completes tick {task.completesAtTick}; {remainingTicks}h remaining.
+      </span>
+      {task.travelDurationTicks > 0 ? <span>{travelRemaining}h travel and {taskRemaining}h task time still scheduled.</span> : null}
+      <span>{task.reason}</span>
     </div>
   );
 }
@@ -1005,6 +1015,8 @@ function CityMap({
     >
       <div className="map-zoom-layer" style={zoomLayerStyle}>
         <CityMapArtwork />
+        <RoadLayer city={city} />
+        <ActiveRouteLayer city={city} />
         {city.structures.map((structure) => (
           <div
             className={`structure-marker structure-marker--${structure.kind}`}
@@ -1036,6 +1048,66 @@ function CityMap({
         ))}
       </div>
     </div>
+  );
+}
+
+function RoadLayer({ city }: { city: CityState }) {
+  return (
+    <svg className="road-layer" viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true">
+      {(city.roads ?? []).map((road) => {
+        const from = city.structures.find((structure) => structure.id === road.fromStructureId);
+        const to = city.structures.find((structure) => structure.id === road.toStructureId);
+
+        if (!from || !to) {
+          return null;
+        }
+
+        return (
+          <line
+            className={`road-line road-line--${road.kind}`}
+            key={road.id}
+            x1={from.position.x}
+            x2={to.position.x}
+            y1={from.position.y}
+            y2={to.position.y}
+          />
+        );
+      })}
+    </svg>
+  );
+}
+
+function ActiveRouteLayer({ city }: { city: CityState }) {
+  const routes = city.tasks.filter((task) => task.status === "active" && (task.routeStructureIds?.length ?? 0) > 1);
+
+  if (routes.length === 0) {
+    return null;
+  }
+
+  return (
+    <svg className="active-route-layer" viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true">
+      {routes.flatMap((task) =>
+        task.routeStructureIds.slice(1).map((structureId, index) => {
+          const from = city.structures.find((structure) => structure.id === task.routeStructureIds[index]);
+          const to = city.structures.find((structure) => structure.id === structureId);
+
+          if (!from || !to) {
+            return null;
+          }
+
+          return (
+            <line
+              className="active-route-line"
+              key={`${task.id}:${from.id}:${to.id}`}
+              x1={from.position.x}
+              x2={to.position.x}
+              y1={from.position.y}
+              y2={to.position.y}
+            />
+          );
+        }),
+      )}
+    </svg>
   );
 }
 
@@ -1131,6 +1203,7 @@ function CityInfo({
     <div className="info-grid">
       <Stat label="Citizens" value={city.citizens.length.toString()} />
       <Stat label="Districts" value={city.districts.length.toString()} />
+      <Stat label="Active tasks" value={city.tasks.filter((task) => task.status === "active").length.toString()} />
       <Stat label="Mood" value={`${averageMood}%`} />
       <Stat label="Stability" value={`${averageStability}%`} />
       <Stat label="Public safety" value={`${city.metrics.publicSafety}%`} />
@@ -1173,6 +1246,29 @@ function DistrictList({ city }: { city: CityState }) {
           <strong>{district.stability}%</strong>
         </div>
       ))}
+    </div>
+  );
+}
+
+function RoadList({ city }: { city: CityState }) {
+  return (
+    <div className="road-list">
+      {(city.roads ?? []).map((road) => {
+        const from = city.structures.find((structure) => structure.id === road.fromStructureId);
+        const to = city.structures.find((structure) => structure.id === road.toStructureId);
+
+        return (
+          <div className="road-row" key={road.id}>
+            <div>
+              <strong>{road.name}</strong>
+              <span>{road.kind}</span>
+            </div>
+            <small>
+              {from?.name ?? "Unknown"} / {to?.name ?? "Unknown"}
+            </small>
+          </div>
+        );
+      })}
     </div>
   );
 }
@@ -1379,15 +1475,15 @@ function CitizenDetailTemplate({ citizen }: { citizen: Citizen }) {
 }
 
 function AiProposalTemplate({
+  aiRequestStatus,
   city,
   citizen,
-  onApplyCitizenAction,
-  onApplyCitizenProposal,
+  onRequestAiTask,
 }: {
+  aiRequestStatus?: AiRequestStatus;
   city: CityState;
   citizen: Citizen;
-  onApplyCitizenAction: (action: CitizenAction, targetId?: string) => void;
-  onApplyCitizenProposal: (proposal: CitizenActionProposal) => void;
+  onRequestAiTask: (citizenId: string, source?: AiRequestSource) => void;
 }) {
   return (
     <main className="shell template-shell">
@@ -1405,17 +1501,17 @@ function AiProposalTemplate({
           <h2>{citizen.name}</h2>
           <p className="proposal-text">
             This screen uses the same live Ollama proposal flow as the Citizens panel. No proposal is hardcoded:
-            click Ask AI to request JSON from the local model, validate it, then apply it through simulation rules.
+            click Ask AI for next task to request JSON from the local model, validate it, then schedule it as a timed task.
           </p>
         </div>
 
         <div className="panel validation-panel">
           <PanelTitle eyebrow="Controls" title="Live proposal" />
           <CitizenActionControls
+            aiRequestStatus={aiRequestStatus}
             city={city}
             citizen={citizen}
-            onApplyCitizenAction={onApplyCitizenAction}
-            onApplyCitizenProposal={onApplyCitizenProposal}
+            onRequestAiTask={onRequestAiTask}
           />
         </div>
       </section>
@@ -1594,17 +1690,17 @@ function EventItem({ event }: { event: CityEvent }) {
 function markerPosition(citizen: Citizen, index: number) {
   const markerOffsets = [
     { x: 0, y: 0 },
-    { x: 4, y: -4 },
-    { x: -4, y: 3 },
-    { x: 5, y: 3 },
-    { x: -5, y: -3 },
-    { x: 2, y: 6 },
-    { x: -2, y: -6 },
-    { x: 7, y: -1 },
-    { x: -7, y: 1 },
-    { x: 1, y: -8 },
-    { x: -1, y: 8 },
-    { x: 6, y: 6 },
+    { x: 1.3, y: -1.1 },
+    { x: -1.3, y: 1.1 },
+    { x: 1.5, y: 1 },
+    { x: -1.5, y: -1 },
+    { x: 0.7, y: 1.7 },
+    { x: -0.7, y: -1.7 },
+    { x: 1.9, y: -0.4 },
+    { x: -1.9, y: 0.4 },
+    { x: 0.3, y: -2 },
+    { x: -0.3, y: 2 },
+    { x: 1.6, y: 1.6 },
   ];
   const offset = markerOffsets[index % markerOffsets.length];
 

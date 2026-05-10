@@ -17,8 +17,12 @@ Current modules:
 
 UI flow:
 
-1. The Citizens panel asks `OllamaProvider.proposeCitizenAction` for the selected
-   citizen.
-2. The returned JSON proposal is displayed to the user.
-3. `validateCitizenActionProposal` checks deterministic rules.
-4. `applyCitizenActionProposal` is available only after validation passes.
+1. The app asks `OllamaProvider.proposeCitizenAction` only for citizens who are
+   active and have no task in progress.
+2. The returned JSON proposal is validated by deterministic simulation rules.
+3. Valid proposals become timed simulation tasks through
+   `scheduleCitizenActionProposal`.
+4. The engine adds deterministic road travel time and action duration to the
+   proposal. Work tasks are 4 in-game hours plus any travel hours.
+5. The engine applies consequences only when the task reaches its completion
+   tick.
